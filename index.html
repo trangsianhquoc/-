@@ -2751,4 +2751,208 @@
       ];
 
       podiumEl.innerHTML = slots.map(slot => {
-        if (!slot
+        if (!slot.item) {
+          return `
+            <div class="podium-slot rank-${slot.rank}" style="opacity:0.55;">
+              <div class="podium-medal">${slot.medal}</div>
+              <div class="podium-avatar">-</div>
+              <div class="podium-name">Chưa có</div>
+              <div class="podium-score">—</div>
+              <div class="podium-time">Hạng ${slot.rank}</div>
+            </div>
+          `;
+        }
+        const uName = slot.item.name || "user";
+        const initial = escapeHtml(uName.charAt(0).toUpperCase());
+        const isMe = slot.item.id === playerId;
+        return `
+          <div class="podium-slot rank-${slot.rank} ${isMe ? "is-me" : ""}">
+            <div class="podium-medal">${slot.medal}</div>
+            <div class="podium-avatar">${initial}</div>
+            <div class="podium-name" title="${escapeHtml(uName)}">${escapeHtml(uName)}${isMe ? " (Bạn)" : ""}</div>
+            <div class="podium-score">${formatScore(slot.item.score)} đ</div>
+            <div class="podium-time">⏱️ ${formatTime(slot.item.timeSeconds)}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderListPage() {
+      const listEl = document.getElementById("awok-bxh-list");
+      const pagEl = document.getElementById("awok-bxh-pagination");
+      const infoEl = document.getElementById("awok-bxh-page-info");
+      const prevBtn = document.getElementById("awok-bxh-prev");
+      const nextBtn = document.getElementById("awok-bxh-next");
+      if (!listEl) return;
+
+      if (!allRankings.length) {
+        listEl.innerHTML = '<div style="text-align:center;padding:20px;font-size:13.5px;color:var(--fg-muted);">Chưa có ai hoàn thành đủ 30/30 câu. Hãy làm hết bài để ghi danh lên BXH nhé!</div>';
+        if (pagEl) pagEl.classList.add("hidden");
+        return;
+      }
+
+      const totalPages = Math.max(1, Math.ceil(allRankings.length / PAGE_SIZE));
+      if (currentPage > totalPages) currentPage = totalPages;
+      const start = (currentPage - 1) * PAGE_SIZE;
+      const pageItems = allRankings.slice(start, start + PAGE_SIZE);
+
+      listEl.innerHTML = pageItems.map((item, idx) => {
+        const rank = start + idx + 1;
+        const uName = item.name || "user";
+        const initial = escapeHtml(uName.charAt(0).toUpperCase());
+        const isMe = item.id === playerId;
+        const rankLabel = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `#${rank}`;
+
+        return `
+          <div class="bxh-row ${isMe ? "is-me" : ""}">
+            <div class="bxh-row-left">
+              <div class="bxh-rank-num">${rankLabel}</div>
+              <div class="bxh-avatar-sm">${initial}</div>
+              <div class="bxh-user-meta">
+                <div class="bxh-user-name">${escapeHtml(uName)}${isMe ? " (Bạn)" : ""}</div>
+                <div class="bxh-user-byline">Thời gian làm bài: ${formatTime(item.timeSeconds)}</div>
+              </div>
+            </div>
+            <div class="bxh-row-right">
+              <div class="bxh-val-score">${formatScore(item.score)} đ</div>
+              <div class="bxh-val-time">⏱️ ${formatTime(item.timeSeconds)}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      if (pagEl && totalPages > 1) {
+        pagEl.classList.remove("hidden");
+        infoEl.textContent = `Trang ${currentPage} / ${totalPages} (${allRankings.length} người)`;
+        prevBtn.disabled = currentPage <= 1;
+        nextBtn.disabled = currentPage >= totalPages;
+      } else if (pagEl) {
+        pagEl.classList.add("hidden");
+      }
+    }
+
+    async function loadLeaderboard() {
+      const listEl = document.getElementById("awok-bxh-list");
+      if (listEl) {
+        listEl.innerHTML = '<div style="text-align:center;padding:20px;font-size:13.5px;color:var(--fg-muted);">Đang tải bảng xếp hạng...</div>';
+      }
+      try {
+        const q = query(collection(db, "leaderboard"), orderBy("score", "desc"), limit(100));
+        const snap = await getDocs(q);
+        const rows = [];
+        snap.forEach(d => rows.push({ id: d.id, ...d.data() }));
+
+        // Xếp hạng: điểm cao nhất trước -> trùng điểm thì thời gian nhanh nhất (nhỏ nhất) trước
+        rows.sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          return a.timeSeconds - b.timeSeconds;
+        });
+
+        allRankings = rows;
+        renderPodium(allRankings.slice(0, 3));
+        renderListPage();
+      } catch (err) {
+        console.error("Lỗi tải BXH:", err);
+        if (listEl) {
+          listEl.innerHTML = '<div style="text-align:center;padding:20px;font-size:13.5px;color:#ef4444;">Không tải được BXH. Hãy kiểm tra Firestore Rules trên Firebase.</div>';
+        }
+      }
+    }
+
+    async function saveScore(score, timeSeconds) {
+      const cleanScore = Number(score);
+      const cleanTime = Math.max(0, Number(timeSeconds));
+      if (!Number.isFinite(cleanScore) || !Number.isFinite(cleanTime)) return;
+
+      const docRef = doc(db, "leaderboard", playerId);
+      const name = getPlayerName();
+
+      try {
+        const snap = await getDoc(docRef);
+        if (snap.exists()) {
+          const prev = snap.data();
+          const isBetter =
+            cleanScore > prev.score ||
+            (cleanScore === prev.score && cleanTime < prev.timeSeconds);
+
+          if (isBetter) {
+            await setDoc(docRef, { name, score: cleanScore, timeSeconds: cleanTime, updatedAt: serverTimestamp() });
+          } else if (prev.name !== name) {
+            await updateDoc(docRef, { name, updatedAt: serverTimestamp() });
+          }
+        } else {
+          await setDoc(docRef, { name, score: cleanScore, timeSeconds: cleanTime, updatedAt: serverTimestamp() });
+        }
+        await loadLeaderboard();
+      } catch (err) {
+        console.error("Lỗi lưu điểm BXH:", err);
+      }
+    }
+
+    window.awokSaveScore = saveScore;
+    window.awokLoadLeaderboard = loadLeaderboard;
+
+    function initBxhUI() {
+      const nameInput = document.getElementById("awok-name-input");
+      const saveBtn = document.getElementById("awok-save-name");
+      const statusEl = document.getElementById("awok-name-status");
+      const refreshBtn = document.getElementById("awok-refresh-bxh");
+      const prevBtn = document.getElementById("awok-bxh-prev");
+      const nextBtn = document.getElementById("awok-bxh-next");
+
+      if (nameInput) nameInput.value = getPlayerName();
+
+      if (saveBtn) {
+        saveBtn.addEventListener("click", async () => {
+          const newName = (nameInput ? nameInput.value : "").trim().slice(0, 30) || "user";
+          if (nameInput) nameInput.value = newName;
+          localStorage.setItem("awok_player_name", newName);
+          if (statusEl) statusEl.textContent = "Đang cập nhật tên...";
+
+          try {
+            const docRef = doc(db, "leaderboard", playerId);
+            const snap = await getDoc(docRef);
+            if (snap.exists()) {
+              await updateDoc(docRef, { name: newName, updatedAt: serverTimestamp() });
+              await loadLeaderboard();
+            }
+            if (statusEl) statusEl.textContent = "Đã lưu tên: " + newName;
+          } catch {
+            if (statusEl) statusEl.textContent = "Đã lưu tên trên thiết bị: " + newName;
+          }
+        });
+      }
+
+      if (refreshBtn) {
+        refreshBtn.addEventListener("click", () => {
+          currentPage = 1;
+          loadLeaderboard();
+        });
+      }
+
+      if (prevBtn) {
+        prevBtn.addEventListener("click", () => {
+          if (currentPage > 1) {
+            currentPage--;
+            renderListPage();
+          }
+        });
+      }
+
+      if (nextBtn) {
+        nextBtn.addEventListener("click", () => {
+          const totalPages = Math.max(1, Math.ceil(allRankings.length / PAGE_SIZE));
+          if (currentPage < totalPages) {
+            currentPage++;
+            renderListPage();
+          }
+        });
+      }
+    }
+
+    initBxhUI();
+    trackUniqueViewByIp();
+    loadLeaderboard();
+  </script>
+</body>
+</html>
